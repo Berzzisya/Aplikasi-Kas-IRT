@@ -105,25 +105,78 @@ const emptyData = () => ({
 });
 
 /* ============================= STORAGE ============================= */
+/* ============================= STORAGE (SUPABASE INTEGRATION) ============================= */
 async function loadAll() {
-  let account = null, data = null, session = null;
-  try { const r = await window.storage.get("account"); account = r ? JSON.parse(r.value) : null; } catch (e) {}
-  try { const r = await window.storage.get("app-data"); data = r ? JSON.parse(r.value) : null; } catch (e) {}
-  try { const r = await window.storage.get("session"); session = r ? JSON.parse(r.value) : null; } catch (e) {}
-  return { account, data: data || emptyData(), session };
-}
-async function saveAccount(account) {
-  try { await window.storage.set("account", JSON.stringify(account)); } catch (e) { console.error(e); }
-}
-async function saveData(data) {
-  try { await window.storage.set("app-data", JSON.stringify(data)); } catch (e) { console.error(e); }
-}
-async function saveSession(session) {
   try {
-    if (session) await window.storage.set("session", JSON.stringify(session));
-    else await window.storage.delete("session");
-  } catch (e) { console.error(e); }
+    // 1. Ambil Kategori dari Supabase
+    let { data: categories } = await supabase.from('categories').select('*');
+    if (!categories || categories.length === 0) {
+      // Jika database masih kosong, isi dengan kategori default
+      await supabase.from('categories').insert(DEFAULT_CATEGORIES);
+      categories = DEFAULT_CATEGORIES;
+    }
+
+    // 2. Ambil Transaksi dari Supabase
+    const { data: transactions } = await supabase
+      .from('transactions')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    // 3. Ambil Anggaran & Target
+    const { data: budgets } = await supabase.from('budgets').select('*');
+    const { data: goals } = await supabase.from('goals').select('*');
+
+    // Pemetaan data agar sesuai dengan variabel React
+    const mappedTransactions = (transactions || []).map((t) => ({
+      id: t.id,
+      categoryId: t.category_id,
+      type: t.type,
+      amount: Number(t.amount),
+      note: t.note,
+      date: t.date,
+      receiptUrl: t.receipt_url,
+      deleted: t.deleted,
+    }));
+
+    return {
+      account: null,
+      data: {
+        categories: categories || DEFAULT_CATEGORIES,
+        transactions: mappedTransactions,
+        budgets: budgets || [],
+        goals: goals || [],
+        notifications: [],
+        onboarded: true,
+      },
+      session: null,
+    };
+  } catch (error) {
+    console.error("Gagal memuat data Supabase:", error);
+    return { account: null, data: emptyData(), session: null };
+  }
 }
+
+// Fungsi pembantu untuk menyimpan transaksi baru ke Supabase
+async function simpanTransaksiKeSupabase(tx) {
+  const { data, error } = await supabase.from('transactions').insert([
+    {
+      id: tx.id || uid(),
+      category_id: tx.categoryId,
+      type: tx.type,
+      amount: tx.amount,
+      note: tx.note || '',
+      date: tx.date || todayISO(),
+      receipt_url: tx.receiptUrl || null,
+      deleted: false,
+    },
+  ]);
+  if (error) console.error('Error simpan transaksi:', error.message);
+  return { data, error };
+}
+
+async function saveAccount(account) {}
+async function saveData(data) {}
+async function saveSession(session) {}
 
 /* ============================= SMALL UI PRIMITIVES ============================= */
 function Button({ children, onClick, variant = "primary", full, disabled, icon: Icon, size = "md", type = "button" }) {
