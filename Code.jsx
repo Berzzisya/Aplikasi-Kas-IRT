@@ -10,7 +10,7 @@ import {
   Search, Filter, Download, Target, Bell, Trash2, Edit2, ChevronRight,
   ChevronDown, Tag, ShieldCheck, Cloud, Undo2, Sparkles, Calendar,
   ArrowUpRight, ArrowDownRight, MoreHorizontal, LogOut, Settings as SettingsIcon,
-  BadgeCheck, Zap, FileDown, RefreshCw,
+  BadgeCheck, Zap, FileDown, RefreshCw, Fingerprint, Delete,
 } from "lucide-react";
 
 /* ============================= DESIGN TOKENS =============================
@@ -122,6 +122,21 @@ async function saveSession(session) {
     if (session) await window.storage.set("session", JSON.stringify(session));
     else await window.storage.delete("session");
   } catch (e) { console.error(e); }
+}
+async function loadSecurity() {
+  try { const r = await window.storage.get("security"); return r ? JSON.parse(r.value) : { pinEnabled: false, pinHash: null, biometricEnabled: false, biometricCredentialId: null }; }
+  catch (e) { return { pinEnabled: false, pinHash: null, biometricEnabled: false, biometricCredentialId: null }; }
+}
+async function saveSecurity(security) {
+  try { await window.storage.set("security", JSON.stringify(security)); } catch (e) { console.error(e); }
+}
+// Hash sederhana untuk PIN — HANYA untuk kebutuhan demo/prototipe.
+// Pada aplikasi produksi, verifikasi PIN semestinya dilakukan di server
+// dengan hashing kriptografis (mis. bcrypt/argon2), bukan di client.
+function simpleHash(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) >>> 0;
+  return h.toString(36);
 }
 
 /* ============================= SMALL UI PRIMITIVES ============================= */
@@ -305,13 +320,23 @@ function SignUpScreen({ onSwitch, onDone, existing }) {
   const [form, setForm] = useState({ name: "", email: "", password: "", confirm: "" });
   const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState("");
+  const [otpErr, setOtpErr] = useState("");
   const [step, setStep] = useState("form"); // form -> verify
+  const [otp, setOtp] = useState("");
+  const [genOtp, setGenOtp] = useState(() => String(Math.floor(100000 + Math.random() * 900000)));
+  const [resendCooldown, setResendCooldown] = useState(0);
   const pwRules = {
     len: form.password.length >= 8,
     num: /\d/.test(form.password),
     upper: /[A-Z]/.test(form.password),
   };
   const valid = form.name.trim() && /\S+@\S+\.\S+/.test(form.email) && pwRules.len && pwRules.num && pwRules.upper && form.password === form.confirm;
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const t = setTimeout(() => setResendCooldown((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [resendCooldown]);
 
   function submit() {
     setErr("");
@@ -320,7 +345,27 @@ function SignUpScreen({ onSwitch, onDone, existing }) {
     if (existing && existing.email === form.email.toLowerCase()) return setErr("Email sudah terdaftar. Silakan masuk.");
     if (!pwRules.len || !pwRules.num || !pwRules.upper) return setErr("Password belum memenuhi syarat keamanan.");
     if (form.password !== form.confirm) return setErr("Konfirmasi password tidak cocok.");
+    setOtp(""); setOtpErr(""); setResendCooldown(30);
     setStep("verify");
+    // Simulasi pengiriman OTP: karena prototipe ini belum tersambung ke
+    // layanan email sungguhan, kode dicatat ke console (bukan ditampilkan
+    // di layar) supaya alur tetap bisa diuji tanpa membocorkannya ke UI.
+    console.log("[DEMO] Kode OTP verifikasi email:", genOtp);
+  }
+
+  function verifyOtp() {
+    if (otp.length !== 6) { setOtpErr("Masukkan 6 digit kode OTP."); return; }
+    if (otp !== genOtp) { setOtpErr("Kode OTP salah. Periksa kembali email Anda."); return; }
+    setOtpErr("");
+    onDone({ name: form.name.trim(), email: form.email.toLowerCase(), password: form.password });
+  }
+
+  function resendOtp() {
+    if (resendCooldown > 0) return;
+    const next = String(Math.floor(100000 + Math.random() * 900000));
+    setGenOtp(next);
+    setOtp(""); setOtpErr(""); setResendCooldown(30);
+    console.log("[DEMO] Kode OTP verifikasi email (kirim ulang):", next);
   }
 
   return (
@@ -360,18 +405,41 @@ function SignUpScreen({ onSwitch, onDone, existing }) {
           </p>
         </>
       ) : (
-        <div style={{ textAlign: "center", paddingTop: 40 }}>
+        <div style={{ textAlign: "center", paddingTop: 24 }}>
           <div style={{ width: 70, height: 70, borderRadius: 20, background: T.primaryLight, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 18px" }}>
             <Mail size={30} color={T.primary} />
           </div>
           <h2 style={{ fontSize: 19, fontWeight: 800, color: T.text, margin: "0 0 8px" }}>Verifikasi email Anda</h2>
-          <p style={{ color: T.textMuted, fontSize: 14, lineHeight: 1.6, margin: "0 0 26px" }}>
-            Kami mengirim tautan verifikasi ke <b style={{ color: T.text }}>{form.email}</b>. Buka email tersebut untuk mengaktifkan akun.
+          <p style={{ color: T.textMuted, fontSize: 14, lineHeight: 1.6, margin: "0 0 22px" }}>
+            Kami mengirim kode OTP 6-digit ke <b style={{ color: T.text }}>{form.email}</b>. Masukkan kode tersebut untuk mengaktifkan akun.
           </p>
-          <Button full size="lg" icon={BadgeCheck} onClick={() => onDone({ name: form.name.trim(), email: form.email.toLowerCase(), password: form.password })}>
-            Simulasikan verifikasi berhasil
+          <div style={{ textAlign: "left" }}>
+            <Field label="Kode OTP">
+              <TextInput
+                value={otp}
+                onChange={(e) => { setOtp(e.target.value.replace(/\D/g, "").slice(0, 6)); setOtpErr(""); }}
+                placeholder="000000"
+                maxLength={6}
+                inputMode="numeric"
+                style={{ textAlign: "center", fontSize: 20, fontWeight: 800, letterSpacing: 6 }}
+              />
+            </Field>
+          </div>
+          {otpErr && <div style={{ color: T.danger, fontSize: 13, fontWeight: 600, marginBottom: 12, textAlign: "left" }}>{otpErr}</div>}
+          <Button full size="lg" icon={BadgeCheck} onClick={verifyOtp} disabled={otp.length !== 6}>
+            Verifikasi & Aktifkan Akun
           </Button>
-          <p style={{ fontSize: 12, color: T.textFaint, marginTop: 14 }}>Tidak menerima email? <span style={{ color: T.primary, fontWeight: 700, cursor: "pointer" }}>Kirim ulang</span></p>
+          <p style={{ fontSize: 12, color: T.textFaint, marginTop: 14 }}>
+            Tidak menerima kode?{" "}
+            {resendCooldown > 0 ? (
+              <span>Kirim ulang dalam {resendCooldown}d</span>
+            ) : (
+              <span onClick={resendOtp} style={{ color: T.primary, fontWeight: 700, cursor: "pointer" }}>Kirim ulang</span>
+            )}
+          </p>
+          <p onClick={() => setStep("form")} style={{ fontSize: 12.5, color: T.textMuted, marginTop: 10, cursor: "pointer", fontWeight: 700 }}>
+            ← Ubah email
+          </p>
         </div>
       )}
     </AuthShell>
@@ -513,6 +581,197 @@ function ForgotPasswordScreen({ onSwitch, account, onReset }) {
         </div>
       )}
     </AuthShell>
+  );
+}
+
+/* ============================= KEAMANAN: PIN & BIOMETRIK ============================= */
+function bufToB64(buf) { return btoa(String.fromCharCode(...new Uint8Array(buf))); }
+function b64ToBuf(b64) { return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)).buffer; }
+
+async function isBiometricAvailable() {
+  try {
+    if (!window.PublicKeyCredential) return false;
+    return await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+  } catch (e) { return false; }
+}
+
+// Mendaftarkan sidik jari/biometrik perangkat sebagai kunci aplikasi.
+// Catatan: ini memakai WebAuthn platform authenticator sebagai gerbang
+// verifikasi lokal (mengandalkan prompt biometrik OS/browser). Tanpa
+// server untuk memverifikasi signature secara kriptografis, pola ini
+// cocok untuk "kunci aplikasi lokal" seperti pada umumnya app mobile,
+// bukan otentikasi akun penuh.
+async function registerBiometric(account) {
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const userId = crypto.getRandomValues(new Uint8Array(16));
+  const cred = await navigator.credentials.create({
+    publicKey: {
+      challenge,
+      rp: { name: "Keuangan Rumah Tangga" },
+      user: { id: userId, name: account?.email || "user", displayName: account?.name || "Pengguna" },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required" },
+      timeout: 60000,
+    },
+  });
+  return bufToB64(cred.rawId);
+}
+
+async function verifyBiometric(credentialId) {
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  await navigator.credentials.get({
+    publicKey: {
+      challenge,
+      allowCredentials: [{ id: b64ToBuf(credentialId), type: "public-key" }],
+      userVerification: "required",
+      timeout: 60000,
+    },
+  });
+  return true; // resolve berarti verifikasi OS berhasil; reject/exception ditangani caller
+}
+
+function PinDots({ length, filled }) {
+  return (
+    <div style={{ display: "flex", gap: 14, justifyContent: "center", margin: "18px 0 28px" }}>
+      {Array.from({ length }).map((_, i) => (
+        <div key={i} style={{
+          width: 16, height: 16, borderRadius: "50%",
+          background: i < filled ? T.primary : T.surfaceAlt,
+          border: `1.5px solid ${i < filled ? T.primary : T.border}`,
+        }} />
+      ))}
+    </div>
+  );
+}
+
+function PinKeypad({ onDigit, onBackspace }) {
+  const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "back"];
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14, maxWidth: 260, margin: "0 auto" }}>
+      {keys.map((k, i) => {
+        if (k === "") return <div key={i} />;
+        if (k === "back") {
+          return (
+            <button key={i} onClick={onBackspace} style={{ height: 58, borderRadius: 16, border: "none", background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+              <Delete size={22} color={T.textMuted} />
+            </button>
+          );
+        }
+        return (
+          <button key={i} onClick={() => onDigit(k)} style={{
+            height: 58, borderRadius: 16, border: `1.5px solid ${T.border}`, background: T.surface,
+            fontSize: 20, fontWeight: 800, color: T.text, cursor: "pointer", fontFamily: fontStack,
+          }}>
+            {k}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Modal untuk MENGAKTIFKAN PIN (set + konfirmasi) dari halaman Settings
+function SetPinModal({ onSave, onClose }) {
+  const [stage, setStage] = useState("set"); // set -> confirm
+  const [pin, setPin] = useState("");
+  const [confirmPin, setConfirmPin] = useState("");
+  const [err, setErr] = useState("");
+
+  function handleDigit(d) {
+    setErr("");
+    if (stage === "set") {
+      if (pin.length >= 6) return;
+      const next = pin + d;
+      setPin(next);
+      if (next.length === 6) setTimeout(() => setStage("confirm"), 150);
+    } else {
+      if (confirmPin.length >= 6) return;
+      const next = confirmPin + d;
+      setConfirmPin(next);
+      if (next.length === 6) {
+        if (next === pin) onSave(pin);
+        else { setErr("PIN tidak cocok. Coba lagi."); setConfirmPin(""); setPin(""); setStage("set"); }
+      }
+    }
+  }
+  function handleBackspace() {
+    if (stage === "set") setPin(pin.slice(0, -1));
+    else setConfirmPin(confirmPin.slice(0, -1));
+  }
+
+  return (
+    <div style={{ textAlign: "center", padding: "8px 0 10px" }}>
+      <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 6 }}>
+        {stage === "set" ? "Buat PIN baru (6 digit)" : "Konfirmasi PIN"}
+      </div>
+      <div style={{ fontSize: 12.5, color: T.textMuted, marginBottom: 4 }}>PIN ini dipakai untuk membuka aplikasi.</div>
+      <PinDots length={6} filled={stage === "set" ? pin.length : confirmPin.length} />
+      {err && <div style={{ color: T.danger, fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>{err}</div>}
+      <PinKeypad onDigit={handleDigit} onBackspace={handleBackspace} />
+    </div>
+  );
+}
+
+// Layar kunci aplikasi — tampil setiap kali app dibuka bila PIN/biometrik aktif
+function AppLockScreen({ security, account, onUnlock }) {
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  const [bioAvailable, setBioAvailable] = useState(false);
+  const [bioBusy, setBioBusy] = useState(false);
+
+  useEffect(() => { isBiometricAvailable().then(setBioAvailable); }, []);
+
+  async function tryBiometric() {
+    if (bioBusy) return;
+    setBioBusy(true); setErr("");
+    try {
+      await verifyBiometric(security.biometricCredentialId);
+      onUnlock();
+    } catch (e) {
+      setErr("Verifikasi sidik jari gagal atau dibatalkan. Gunakan PIN.");
+    } finally {
+      setBioBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (security.biometricEnabled && security.biometricCredentialId && bioAvailable) tryBiometric();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bioAvailable]);
+
+  function handleDigit(d) {
+    if (pin.length >= 6) return;
+    setErr("");
+    const next = pin + d;
+    setPin(next);
+    if (next.length === 6) {
+      if (simpleHash(next) === security.pinHash) { onUnlock(); }
+      else { setErr("PIN salah. Coba lagi."); setTimeout(() => setPin(""), 300); }
+    }
+  }
+
+  return (
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: T.bg, fontFamily: fontStack, alignItems: "center", justifyContent: "center", padding: 30 }}>
+      <div style={{ width: 60, height: 60, borderRadius: 18, background: T.primary, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 18 }}>
+        <Lock size={26} color="#fff" />
+      </div>
+      <div style={{ fontWeight: 800, fontSize: 17, color: T.text, marginBottom: 4 }}>Aplikasi Terkunci</div>
+      <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 10, textAlign: "center" }}>
+        {account?.name ? `Halo, ${account.name.split(" ")[0]}. ` : ""}
+        {security.pinEnabled ? "Masukkan PIN untuk melanjutkan." : "Verifikasi untuk melanjutkan."}
+      </div>
+      {security.pinEnabled && <PinDots length={6} filled={pin.length} />}
+      {err && <div style={{ color: T.danger, fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>{err}</div>}
+      {security.pinEnabled && <PinKeypad onDigit={handleDigit} onBackspace={() => setPin(pin.slice(0, -1))} />}
+      {security.biometricEnabled && security.biometricCredentialId && bioAvailable && (
+        <button onClick={tryBiometric} disabled={bioBusy} style={{
+          marginTop: 22, display: "flex", alignItems: "center", gap: 8, background: T.primaryLight, color: T.primary,
+          border: "none", borderRadius: 14, padding: "11px 20px", fontWeight: 700, fontSize: 13.5, cursor: "pointer", fontFamily: fontStack,
+        }}>
+          <Fingerprint size={18} /> {bioBusy ? "Memverifikasi..." : "Gunakan Sidik Jari"}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -1579,8 +1838,53 @@ function GoalsPage({ goals, onSave, onDelete, onBack, onContribute }) {
 }
 
 /* ============================= LAINNYA / SETTINGS ============================= */
-function MorePage({ onNav, onLogout, account, data, onImport }) {
+function ToggleSwitch({ on, onChange, disabled }) {
+  return (
+    <button
+      onClick={() => !disabled && onChange(!on)}
+      style={{
+        width: 46, height: 27, borderRadius: 999, border: "none", cursor: disabled ? "not-allowed" : "pointer",
+        background: on ? T.primary : T.border, position: "relative", flexShrink: 0, opacity: disabled ? 0.5 : 1,
+        transition: "background .15s ease",
+      }}
+    >
+      <div style={{
+        width: 21, height: 21, borderRadius: "50%", background: "#fff", position: "absolute", top: 3,
+        left: on ? 22 : 3, transition: "left .15s ease", boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
+      }} />
+    </button>
+  );
+}
+
+function VerifyPinModal({ security, onSuccess, title = "Masukkan PIN" }) {
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  function handleDigit(d) {
+    if (pin.length >= 6) return;
+    setErr("");
+    const next = pin + d;
+    setPin(next);
+    if (next.length === 6) {
+      if (simpleHash(next) === security.pinHash) onSuccess();
+      else { setErr("PIN salah."); setTimeout(() => setPin(""), 300); }
+    }
+  }
+  return (
+    <div style={{ textAlign: "center", padding: "8px 0 10px" }}>
+      <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 10 }}>{title}</div>
+      <PinDots length={6} filled={pin.length} />
+      {err && <div style={{ color: T.danger, fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>{err}</div>}
+      <PinKeypad onDigit={handleDigit} onBackspace={() => setPin(pin.slice(0, -1))} />
+    </div>
+  );
+}
+
+function MorePage({ onNav, onLogout, account, data, onImport, security, onSetPin, onDisablePin, onToggleBiometric }) {
   const fileRef = useRef(null);
+  const [secModal, setSecModal] = useState(null); // null | 'setpin' | 'disablepin'
+  const [bioErr, setBioErr] = useState("");
+  const [bioSupported, setBioSupported] = useState(true);
+  useEffect(() => { isBiometricAvailable().then(setBioSupported); }, []);
   const items = [
     { icon: Tag, label: "Kelola Kategori", desc: "Tambah, ubah, atau hapus kategori", nav: "categories" },
     { icon: Target, label: "Target Tabungan", desc: "Kelola tujuan menabung Anda", nav: "goals" },
@@ -1627,7 +1931,54 @@ function MorePage({ onNav, onLogout, account, data, onImport }) {
           </div>
         ))}
 
-        <div style={{ fontSize: 12, fontWeight: 800, color: T.textFaint, textTransform: "uppercase", margin: "20px 0 8px" }}>Cadangan Data (Cloud Backup)</div>
+        <div style={{ fontSize: 12, fontWeight: 800, color: T.textFaint, textTransform: "uppercase", margin: "20px 0 8px" }}>Keamanan Aplikasi</div>
+        <Card style={{ marginBottom: 10, padding: "4px 14px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 0", borderBottom: `1px solid ${T.border}` }}>
+            <div style={{ width: 38, height: 38, borderRadius: 10, background: T.primaryLight, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <Lock size={17} color={T.primary} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 13.5 }}>Kunci dengan PIN</div>
+              <div style={{ fontSize: 11.5, color: T.textFaint }}>PIN 6-digit saat membuka aplikasi</div>
+            </div>
+            <ToggleSwitch
+              on={security.pinEnabled}
+              onChange={(next) => { if (next) setSecModal("setpin"); else setSecModal("disablepin"); }}
+            />
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 0" }}>
+            <div style={{ width: 38, height: 38, borderRadius: 10, background: T.primaryLight, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <Fingerprint size={17} color={T.primary} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 13.5 }}>Kunci dengan Sidik Jari</div>
+              <div style={{ fontSize: 11.5, color: T.textFaint }}>
+                {bioSupported ? "Gunakan biometrik perangkat" : "Tidak didukung di perangkat ini"}
+              </div>
+            </div>
+            <ToggleSwitch
+              on={security.biometricEnabled}
+              disabled={!bioSupported}
+              onChange={async (next) => {
+                setBioErr("");
+                if (next) {
+                  try {
+                    const credId = await registerBiometric(account);
+                    onToggleBiometric(true, credId);
+                  } catch (e) {
+                    setBioErr("Pendaftaran sidik jari gagal atau dibatalkan.");
+                  }
+                } else {
+                  onToggleBiometric(false, null);
+                }
+              }}
+            />
+          </div>
+        </Card>
+        {bioErr && <div style={{ color: T.danger, fontSize: 12, fontWeight: 600, marginBottom: 10 }}>{bioErr}</div>}
+        <p style={{ fontSize: 11.5, color: T.textFaint, margin: "0 0 20px" }}>PIN dan data biometrik hanya disimpan di perangkat ini.</p>
+
+        <div style={{ fontSize: 12, fontWeight: 800, color: T.textFaint, textTransform: "uppercase", margin: "0 0 8px" }}>Cadangan Data (Cloud Backup)</div>
         <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
           <Button variant="secondary" icon={Cloud} onClick={exportBackup} full>Ekspor Cadangan</Button>
           <Button variant="outline" icon={RefreshCw} onClick={() => fileRef.current.click()} full>Impor Cadangan</Button>
@@ -1636,6 +1987,13 @@ function MorePage({ onNav, onLogout, account, data, onImport }) {
 
         <Button variant="danger" icon={LogOut} full onClick={onLogout}>Keluar Akun</Button>
       </div>
+
+      <Modal open={secModal === "setpin"} onClose={() => setSecModal(null)} title="Aktifkan Kunci PIN">
+        <SetPinModal onSave={(pin) => { onSetPin(pin); setSecModal(null); }} onClose={() => setSecModal(null)} />
+      </Modal>
+      <Modal open={secModal === "disablepin"} onClose={() => setSecModal(null)} title="Nonaktifkan Kunci PIN">
+        <VerifyPinModal security={security} title="Masukkan PIN untuk menonaktifkan" onSuccess={() => { onDisablePin(); setSecModal(null); }} />
+      </Modal>
     </div>
   );
 }
@@ -1729,15 +2087,25 @@ export default function App() {
   const [txModal, setTxModal] = useState(null); // null | 'new' | tx object
   const [toast, setToast] = useState(null);
   const undoRef = useRef(null);
+  const [security, setSecurity] = useState({ pinEnabled: false, pinHash: null, biometricEnabled: false, biometricCredentialId: null });
+  const [appLocked, setAppLocked] = useState(false);
 
   useEffect(() => {
     (async () => {
       const { account: acc, data: d, session } = await loadAll();
       setAccount(acc); setData(d);
+      const sec = await loadSecurity();
+      setSecurity(sec);
       if (acc && session?.loggedIn) setAuthed(true);
+      if (sec.pinEnabled || sec.biometricEnabled) setAppLocked(true);
       setLoading(false);
     })();
   }, []);
+
+  function persistSecurity(next) { setSecurity(next); saveSecurity(next); }
+  function handleSetPin(pin) { persistSecurity({ ...security, pinEnabled: true, pinHash: simpleHash(pin) }); }
+  function handleDisablePin() { persistSecurity({ ...security, pinEnabled: false, pinHash: null }); }
+  function handleToggleBiometric(enabled, credId) { persistSecurity({ ...security, biometricEnabled: enabled, biometricCredentialId: enabled ? credId : null }); }
 
   const persist = useCallback((next) => { setData(next); saveData(next); }, []);
 
@@ -1766,6 +2134,7 @@ export default function App() {
   }
   async function handleLogout() {
     await saveSession(null); setAuthed(false); setAuthScreen("login"); setTab("dashboard"); setSubpage(null);
+    if (security.pinEnabled || security.biometricEnabled) setAppLocked(true);
   }
 
   /* ----- DATA HANDLERS ----- */
@@ -1862,6 +2231,15 @@ export default function App() {
     );
   }
 
+  if (appLocked && (security.pinEnabled || security.biometricEnabled)) {
+    return (
+      <div style={shellStyle}>
+        <style>{`@keyframes kxUp { from { transform: translateY(16px); opacity:0 } to { transform: translateY(0); opacity:1 } }`}</style>
+        <AppLockScreen security={security} account={account} onUnlock={() => setAppLocked(false)} />
+      </div>
+    );
+  }
+
   function nav(dest, arg) {
     if (["categories", "budget", "goals", "notifications"].includes(dest)) setSubpage(dest);
     else if (dest === "txdetail") { const t = data.transactions.find((x) => x.id === arg); setTxModal(t); }
@@ -1882,7 +2260,7 @@ export default function App() {
         {!subpage && tab === "transactions" && <TransactionsPage data={data} catMap={catMap} onNav={nav} onEdit={(t) => setTxModal(t)} />}
         {!subpage && tab === "report" && <ReportsPage data={data} catMap={catMap} />}
         {!subpage && tab === "gallery" && <GalleryPage data={data} catMap={catMap} onOpenTx={(t) => setTxModal(t)} />}
-        {!subpage && tab === "more" && <MorePage onNav={nav} onLogout={handleLogout} account={account} data={data} onImport={importBackup} />}
+        {!subpage && tab === "more" && <MorePage onNav={nav} onLogout={handleLogout} account={account} data={data} onImport={importBackup} security={security} onSetPin={handleSetPin} onDisablePin={handleDisablePin} onToggleBiometric={handleToggleBiometric} />}
       </div>
 
       {!subpage && <BottomNav tab={tab} onTab={setTab} onQuickAdd={() => setTxModal("new")} />}
