@@ -1,4 +1,3 @@
-import { supabase } from './supabaseClient';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import {
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip,
@@ -105,78 +104,25 @@ const emptyData = () => ({
 });
 
 /* ============================= STORAGE ============================= */
-/* ============================= STORAGE (SUPABASE INTEGRATION) ============================= */
 async function loadAll() {
+  let account = null, data = null, session = null;
+  try { const r = await window.storage.get("account"); account = r ? JSON.parse(r.value) : null; } catch (e) {}
+  try { const r = await window.storage.get("app-data"); data = r ? JSON.parse(r.value) : null; } catch (e) {}
+  try { const r = await window.storage.get("session"); session = r ? JSON.parse(r.value) : null; } catch (e) {}
+  return { account, data: data || emptyData(), session };
+}
+async function saveAccount(account) {
+  try { await window.storage.set("account", JSON.stringify(account)); } catch (e) { console.error(e); }
+}
+async function saveData(data) {
+  try { await window.storage.set("app-data", JSON.stringify(data)); } catch (e) { console.error(e); }
+}
+async function saveSession(session) {
   try {
-    // 1. Ambil Kategori dari Supabase
-    let { data: categories } = await supabase.from('categories').select('*');
-    if (!categories || categories.length === 0) {
-      // Jika database masih kosong, isi dengan kategori default
-      await supabase.from('categories').insert(DEFAULT_CATEGORIES);
-      categories = DEFAULT_CATEGORIES;
-    }
-
-    // 2. Ambil Transaksi dari Supabase
-    const { data: transactions } = await supabase
-      .from('transactions')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    // 3. Ambil Anggaran & Target
-    const { data: budgets } = await supabase.from('budgets').select('*');
-    const { data: goals } = await supabase.from('goals').select('*');
-
-    // Pemetaan data agar sesuai dengan variabel React
-    const mappedTransactions = (transactions || []).map((t) => ({
-      id: t.id,
-      categoryId: t.category_id,
-      type: t.type,
-      amount: Number(t.amount),
-      note: t.note,
-      date: t.date,
-      receiptUrl: t.receipt_url,
-      deleted: t.deleted,
-    }));
-
-    return {
-      account: null,
-      data: {
-        categories: categories || DEFAULT_CATEGORIES,
-        transactions: mappedTransactions,
-        budgets: budgets || [],
-        goals: goals || [],
-        notifications: [],
-        onboarded: true,
-      },
-      session: null,
-    };
-  } catch (error) {
-    console.error("Gagal memuat data Supabase:", error);
-    return { account: null, data: emptyData(), session: null };
-  }
+    if (session) await window.storage.set("session", JSON.stringify(session));
+    else await window.storage.delete("session");
+  } catch (e) { console.error(e); }
 }
-
-// Fungsi pembantu untuk menyimpan transaksi baru ke Supabase
-async function simpanTransaksiKeSupabase(tx) {
-  const { data, error } = await supabase.from('transactions').insert([
-    {
-      id: tx.id || uid(),
-      category_id: tx.categoryId,
-      type: tx.type,
-      amount: tx.amount,
-      note: tx.note || '',
-      date: tx.date || todayISO(),
-      receipt_url: tx.receiptUrl || null,
-      deleted: false,
-    },
-  ]);
-  if (error) console.error('Error simpan transaksi:', error.message);
-  return { data, error };
-}
-
-async function saveAccount(account) {}
-async function saveData(data) {}
-async function saveSession(session) {}
 
 /* ============================= SMALL UI PRIMITIVES ============================= */
 function Button({ children, onClick, variant = "primary", full, disabled, icon: Icon, size = "md", type = "button" }) {
@@ -854,6 +800,138 @@ function fileToCompressedDataUrl(file, maxDim = 480, quality = 0.7) {
   });
 }
 
+// Kompres dataURL hasil jepretan kamera dengan cara yang sama seperti file upload,
+// supaya ukuran foto nota tetap kecil dan aman disimpan (batas 5MB per key).
+function compressDataUrl(dataUrl, maxDim = 480, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > height && width > maxDim) { height = (height * maxDim) / width; width = maxDim; }
+      else if (height > maxDim) { width = (width * maxDim) / height; height = maxDim; }
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+}
+
+/* ---- Kamera real-time (getUserMedia) — dipakai untuk memotret nota langsung ---- */
+function CameraCapture({ onCapture, onClose, onPickGallery }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState("");
+  const [facing, setFacing] = useState("environment"); // kamera belakang default (cocok utk foto nota)
+
+  const stopStream = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((tr) => tr.stop());
+      streamRef.current = null;
+    }
+  }, []);
+
+  const startCamera = useCallback(async (mode) => {
+    setError(""); setReady(false);
+    stopStream();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: mode }, width: { ideal: 1280 }, height: { ideal: 960 } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+        setReady(true);
+      }
+    } catch (err) {
+      console.error("Gagal mengakses kamera:", err);
+      setError("Tidak dapat mengakses kamera. Pastikan izin kamera diaktifkan di browser, lalu coba lagi — atau pilih foto dari galeri.");
+    }
+  }, [stopStream]);
+
+  useEffect(() => {
+    startCamera(facing);
+    return () => stopStream();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [facing]);
+
+  async function handleSnap() {
+    const video = videoRef.current, canvas = canvasRef.current;
+    if (!video || !canvas || !ready) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext("2d");
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const rawDataUrl = canvas.toDataURL("image/png");
+    const compressed = await compressDataUrl(rawDataUrl, 480, 0.7);
+    stopStream();
+    onCapture(compressed);
+  }
+
+  return (
+    <div style={{
+      position: "absolute", inset: 0, background: "#000", zIndex: 80,
+      display: "flex", flexDirection: "column", fontFamily: fontStack,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 16px 10px" }}>
+        <button onClick={() => { stopStream(); onClose(); }} style={{ background: "rgba(255,255,255,0.15)", border: "none", borderRadius: 10, padding: 8, cursor: "pointer", display: "flex" }}>
+          <X size={20} color="#fff" />
+        </button>
+        <span style={{ color: "#fff", fontWeight: 700, fontSize: 13.5 }}>Foto Nota</span>
+        <button onClick={() => setFacing(facing === "environment" ? "user" : "environment")} style={{ background: "rgba(255,255,255,0.15)", border: "none", borderRadius: 10, padding: 8, cursor: "pointer", display: "flex" }}>
+          <RefreshCw size={18} color="#fff" />
+        </button>
+      </div>
+      <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+        {error ? (
+          <div style={{ color: "#fff", textAlign: "center", padding: "0 30px", fontSize: 13.5, lineHeight: 1.6 }}>{error}</div>
+        ) : (
+          <video ref={videoRef} playsInline muted style={{ width: "100%", height: "100%", objectFit: "cover", display: ready ? "block" : "none" }} />
+        )}
+        {!ready && !error && (
+          <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>Membuka kamera...</div>
+        )}
+        <div style={{ position: "absolute", inset: 24, border: "1.5px dashed rgba(255,255,255,0.4)", borderRadius: 16, pointerEvents: "none" }} />
+      </div>
+      <canvas ref={canvasRef} style={{ display: "none" }} />
+      <div style={{ padding: "18px 20px calc(env(safe-area-inset-bottom, 0px) + 22px)", display: "flex", justifyContent: "center", alignItems: "center", gap: 26 }}>
+        <button
+          onClick={() => { stopStream(); onPickGallery(); }}
+          title="Pilih dari galeri"
+          style={{
+            width: 46, height: 46, borderRadius: 14, background: "rgba(255,255,255,0.15)", border: "none",
+            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          <ImageIcon size={20} color="#fff" />
+        </button>
+        <button
+          onClick={handleSnap}
+          disabled={!ready}
+          style={{
+            width: 68, height: 68, borderRadius: "50%", background: "#fff", border: "5px solid rgba(255,255,255,0.35)",
+            cursor: ready ? "pointer" : "not-allowed", opacity: ready ? 1 : 0.5, display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          <Camera size={26} color={T.primaryDark} />
+        </button>
+        <div style={{ width: 46, height: 46 }} />
+      </div>
+      <div style={{ textAlign: "center", paddingBottom: 10 }}>
+        <span onClick={() => { stopStream(); onPickGallery(); }} style={{ color: "rgba(255,255,255,0.75)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+          Tidak mau foto langsung? Pilih dari galeri
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function TransactionForm({ initial, categories, onSave, onClose, onDelete }) {
   const [type, setType] = useState(initial?.type || "expense");
   const [amount, setAmount] = useState(initial?.amount ? String(initial.amount) : "");
@@ -862,6 +940,7 @@ function TransactionForm({ initial, categories, onSave, onClose, onDelete }) {
   const [note, setNote] = useState(initial?.note || "");
   const [photo, setPhoto] = useState(initial?.photo || null);
   const [recurring, setRecurring] = useState(initial?.recurring?.freq || "");
+  const [cameraOpen, setCameraOpen] = useState(false);
   const fileRef = useRef(null);
 
   const filteredCats = categories.filter((c) => c.kind === type);
@@ -957,15 +1036,31 @@ function TransactionForm({ initial, categories, onSave, onClose, onDelete }) {
             </button>
           </div>
         ) : (
-          <button onClick={() => fileRef.current.click()} style={{
-            width: 100, height: 100, borderRadius: 12, border: `1.5px dashed ${T.border}`, background: T.surfaceAlt,
-            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5, cursor: "pointer",
-          }}>
-            <Camera size={20} color={T.textMuted} />
-            <span style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700 }}>Tambah foto</span>
-          </button>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={() => setCameraOpen(true)} style={{
+              width: 100, height: 100, borderRadius: 12, border: `1.5px dashed ${T.primary}`, background: T.primaryLight,
+              display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5, cursor: "pointer",
+            }}>
+              <Camera size={20} color={T.primary} />
+              <span style={{ fontSize: 10.5, color: T.primary, fontWeight: 700 }}>Buka Kamera</span>
+            </button>
+            <button onClick={() => fileRef.current.click()} style={{
+              width: 100, height: 100, borderRadius: 12, border: `1.5px dashed ${T.border}`, background: T.surfaceAlt,
+              display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5, cursor: "pointer",
+            }}>
+              <ImageIcon size={20} color={T.textMuted} />
+              <span style={{ fontSize: 10.5, color: T.textMuted, fontWeight: 700 }}>Dari Galeri</span>
+            </button>
+          </div>
         )}
         <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: "none" }} />
+        {cameraOpen && (
+          <CameraCapture
+            onCapture={(dataUrl) => { setPhoto(dataUrl); setCameraOpen(false); }}
+            onClose={() => setCameraOpen(false)}
+            onPickGallery={() => { setCameraOpen(false); setTimeout(() => fileRef.current.click(), 50); }}
+          />
+        )}
       </Field>
 
       <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
